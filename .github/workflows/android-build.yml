@@ -18,7 +18,7 @@ concurrency:
 jobs:
   build-android:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240  # Android + Docker 이미지 빌드 여유
 
     steps:
       - name: Checkout
@@ -27,8 +27,30 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      # ⬇️ 도커 호출을 가로채서 `run`의 `-t/-it/-ti/--tty`만 제거합니다.
-      #     레포 소스는 손대지 않습니다.
+      # 1) 디스크 공간 확보 (러너에 기본으로 깔린 대형 툴 제거)
+      - name: Free disk space (remove preinstalled large SDKs/toolchains)
+        shell: bash
+        run: |
+          echo "Before:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          sudo docker system prune -af || true
+          sudo apt-get clean || true
+          echo "After:"
+          df -h /
+
+      # (선택) 더 공격적으로 비우고 싶으면 위 스텝 뒤에 아래도 추가 가능
+      # - name: Extra prune
+      #   run: |
+      #     sudo rm -rf /var/lib/docker || true
+      #     sudo systemctl restart docker || true
+      #     df -h /
+
+      # 2) docker run의 -t/-it/--tty 옵션 제거용 쉬임(레포 소스 무수정)
       - name: Inject docker shim (drop TTY flags)
         shell: bash
         run: |
@@ -41,7 +63,7 @@ jobs:
             args=()
             for a in "$@"; do
               case "$a" in
-                -t|-it|-ti|--tty) ;;   # TTY 관련 옵션만 제거
+                -t|-it|-ti|--tty) ;;   # TTY 옵션 제거
                 *) args+=("$a");;
               esac
             done
@@ -55,20 +77,26 @@ jobs:
           which docker
           docker --version
 
+      # 3) 빌드
       - name: Build Android (qml arm64-v8a debug)
         shell: bash
         env:
-          CI: "1"   # 비대화형 환경 표시(불필요한 프롬프트 방지)
+          CI: "1"                 # 비대화형 프롬프트 방지 힌트
+          DOCKER_BUILDKIT: "1"    # 빌드킷 사용(효율적)
+          COMPOSE_DOCKER_CLI_BUILD: "1"
         run: |
           chmod +x ./contrib/android/build.sh
           ./contrib/android/build.sh qml arm64-v8a debug
 
+      # 4) 산출물 찾기
       - name: Locate APKs
         shell: bash
         run: |
           echo "Listing APKs..."
           find . -maxdepth 7 -type f -name "*.apk" -print || true
+          df -h /
 
+      # 5) 아티팩트 업로드
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -78,3 +106,10 @@ jobs:
             **/*-debug.apk
           if-no-files-found: warn
           retention-days: 7
+
+      # 6) (선택) 빌드 후 도커/임시파일 정리
+      - name: Post-build prune
+        if: always()
+        run: |
+          sudo docker system prune -af || true
+          df -h /
